@@ -61,6 +61,42 @@ if (!isset($postData['s3_path'])) {
     exit;
 }
 
+function invokeAWSLambda($jsonData) {
+    try {
+        $lambda = new Aws\Lambda\LambdaClient([
+            'version' => 'latest',
+            'region'  => $_ENV['AWS_REGION'],
+            'credentials' => [
+                'key'    => $_ENV['AWS_ACCESS_KEY_ID'],
+                'secret' => $_ENV['AWS_SECRET_ACCESS_KEY'],
+            ]
+        ]);
+
+        $result = $lambda->invoke([
+            'FunctionName' => $_ENV['AWS_LAMBDA_FUNCTION_NAME'],
+            'InvocationType' => 'RequestResponse',
+            'Payload' => json_encode($jsonData)
+        ]);
+
+        return [
+            'status' => 'success',
+            'lambda_response' => json_decode((string) $result->get('Payload'), true)
+        ];
+
+    } catch (Exception $e) {
+        return [
+            'status' => 'error',
+            'message' => 'Lambda Error: ' . $e->getMessage()
+        ];
+    }
+}
+
 $s3Path = $postData['s3_path'];
 $result = getJsonFromS3($s3Path);
-echo json_encode($result);
+
+if ($result['status'] === 'success') {
+    $lambdaResult = invokeAWSLambda($result['data']);
+    echo json_encode($lambdaResult);
+} else {
+    echo json_encode($result);
+}
