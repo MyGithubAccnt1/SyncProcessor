@@ -27,10 +27,15 @@ function getJsonFromS3($s3Path) {
         ]);
 
         $content = $result['Body']->getContents();
+        
+        // Replace NaN with null as NaN is not valid JSON
+        $content = preg_replace('/:\s*NaN\s*,/', ': null,', $content);
+        
         $jsonData = json_decode($content, true);
         
         if (json_last_error() !== JSON_ERROR_NONE) {
-            throw new Exception('Invalid JSON content');
+            throw new Exception('JSON Error: ' . json_last_error_msg() . 
+                              "\nFirst 100 chars of content: " . substr($content, 0, 100));
         }
 
         return [
@@ -51,6 +56,11 @@ function getJsonFromS3($s3Path) {
     }
 }
 
+function isValidJson($string) {
+    json_decode($string);
+    return json_last_error() === JSON_ERROR_NONE;
+}
+
 $postData = json_decode(file_get_contents('php://input'), true);
 
 if (!isset($postData['s3_path'])) {
@@ -69,24 +79,75 @@ function invokeAWSLambda($jsonData) {
             'credentials' => [
                 'key'    => $_ENV['AWS_ACCESS_KEY_ID'],
                 'secret' => $_ENV['AWS_SECRET_ACCESS_KEY'],
+            ],
+            'http' => [
+                'timeout' => 30
             ]
         ]);
+
+        if (empty($jsonData)) {
+            throw new InvalidArgumentException('Empty payload');
+        }
 
         $result = $lambda->invoke([
             'FunctionName' => $_ENV['AWS_LAMBDA_FUNCTION_NAME'],
             'InvocationType' => 'RequestResponse',
-            'Payload' => json_encode($jsonData)
+            'LogType' => 'Tail',
+            'Payload' => json_encode([
+                'body' => json_encode($jsonData)  // Double encode for Lambda
+            ]),
+            'ClientContext' => base64_encode(json_encode([
+                'source' => 'syncProcessor',
+                'timestamp' => time()
+            ]))
         ]);
 
+        $payload = json_decode((string) $result->get('Payload'), true);
+        if (isset($payload['FunctionError'])) {
+            throw new Exception($payload['errorMessage'] ?? 'Lambda execution failed');
+        }
+
+        // Parse the response body
+        $responseBody = isset($payload['body']) ? json_decode($payload['body'], true) : null;
+
+        // Get request ID from logs
+        $logResult = base64_decode($result->get('LogResult') ?? '');
+        preg_match('/RequestId: ([^\s]+)/', $logResult, $matches);
+        $requestId = $matches[1] ?? 'unknown';
+
+        if ($payload['statusCode'] !== 200) {
+            return [
+                'success' => false,
+                'message' => $responseBody['error'] ?? 'Unknown error',
+                'data' => null,
+                'request_id' => $requestId,
+                'status_code' => $payload['statusCode']
+            ];
+        }
+
         return [
-            'status' => 'success',
-            'lambda_response' => json_decode((string) $result->get('Payload'), true)
+            'success' => true,
+            'message' => $responseBody['message'] ?? 'Success',
+            'data' => $responseBody['data'] ?? null,
+            'request_id' => $requestId,
+            'status_code' => 200
         ];
 
+    } catch (Aws\Lambda\Exception\LambdaException $e) {
+        return [
+            'success' => false,
+            'message' => 'Lambda Error: ' . $e->getMessage(),
+            'data' => null,
+            'request_id' => null,
+            'status_code' => 500
+        ];
     } catch (Exception $e) {
         return [
-            'status' => 'error',
-            'message' => 'Lambda Error: ' . $e->getMessage()
+            'success' => false,
+            'message' => $e->getMessage(),
+            'data' => null,
+            'request_id' => null,
+            'status_code' => 500
         ];
     }
 }
