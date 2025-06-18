@@ -157,7 +157,37 @@ $result = getJsonFromS3($s3Path);
 
 if ($result['status'] === 'success') {
     $lambdaResult = invokeAWSLambda($result['data']);
-    echo json_encode($lambdaResult);
+    if ($lambdaResult['success']) {
+        try {
+            $newKey = 'Sync-DIR/TRIPKO/Completed/' . basename($s3Path);
+            $s3 = new S3Client([
+                'version' => 'latest',
+                'region'  => $_ENV['AWS_REGION'],
+                'credentials' => [
+                    'key'    => $_ENV['AWS_ACCESS_KEY_ID'],
+                    'secret' => $_ENV['AWS_SECRET_ACCESS_KEY'],
+                ]
+            ]);
+
+            $s3->copyObject([
+                'Bucket' => $_ENV['AWS_BUCKET_NAME'],
+                'CopySource' => "{$_ENV['AWS_BUCKET_NAME']}/{$s3Path}",
+                'Key'        => $newKey,
+                'ACL'        => 'private',
+            ]);
+
+            $s3->deleteObject([
+                'Bucket' => $_ENV['AWS_BUCKET_NAME'],
+                'Key'    => $s3Path
+            ]);
+
+            echo json_encode($lambdaResult);
+        } catch (AwsException $e) {
+            echo "Error: " . $e->getMessage();
+        }
+    } else {
+        echo json_encode($lambdaResult);
+    }
 } else {
     echo json_encode($result);
 }
